@@ -16,6 +16,141 @@ from datetime import datetime
 from datasets import load_dataset
 import random
 import json
+import re
+
+# ============================================================================
+# NUMINAMATH-SPECIFIC ANSWER EXTRACTION (overrides Day 1 functions)
+# ============================================================================
+
+def extract_boxed(text):
+    """
+    Extract content from \boxed{...}, handling nested braces.
+    NuminaMath solutions end with \boxed{answer}.
+    """
+    # Find \boxed{ and extract content with balanced braces
+    pattern = r'\\boxed\{'
+    match = re.search(pattern, text)
+    if not match:
+        return None
+
+    start = match.end()
+    depth = 1
+    i = start
+    while i < len(text) and depth > 0:
+        if text[i] == '{':
+            depth += 1
+        elif text[i] == '}':
+            depth -= 1
+        i += 1
+
+    if depth == 0:
+        return text[start:i-1].strip()
+    return None
+
+
+def normalize_latex(expr):
+    """
+    Normalize LaTeX expression for comparison.
+    Removes whitespace, normalizes common variations.
+    """
+    if expr is None:
+        return None
+
+    # Remove all whitespace
+    expr = re.sub(r'\s+', '', expr)
+
+    # Normalize common LaTeX variations
+    expr = expr.replace('\\cdot', '*')
+    expr = expr.replace('\\times', '*')
+    expr = expr.replace('\\div', '/')
+    expr = expr.replace('\\frac', 'frac')
+    expr = expr.replace('\\dfrac', 'frac')
+    expr = expr.replace('\\tfrac', 'frac')
+
+    return expr.lower()
+
+
+def extract_answer(text):
+    """
+    Extract answer from model output - NuminaMath compatible.
+    Priority: \boxed{} > #### > "answer is" > last number
+    """
+    if text is None:
+        return None
+
+    # 1. Try \boxed{} first (NuminaMath format)
+    boxed = extract_boxed(text)
+    if boxed:
+        return boxed
+
+    # 2. GSM8K format: #### answer
+    gsm_match = re.search(r'####\s*(.+?)(?:\n|$)', text)
+    if gsm_match:
+        return gsm_match.group(1).strip()
+
+    # 3. "The answer is X" - capture full expression
+    ans_match = re.search(r'[Tt]he (?:final )?answer is[:\s]*(.+?)(?:\.|$)', text)
+    if ans_match:
+        return ans_match.group(1).strip()
+
+    # 4. Fallback: last \boxed-like pattern or number
+    # Look for any remaining mathematical expression
+    return None
+
+
+def extract_ground_truth_numina(example):
+    """
+    Extract ground truth from NuminaMath-CoT dataset.
+    The 'solution' field contains step-by-step with \boxed{answer} at end.
+    """
+    if "solution" in example and example["solution"]:
+        boxed = extract_boxed(str(example["solution"]))
+        if boxed:
+            return boxed
+
+    # Fallback to 'answer' field if exists
+    if "answer" in example and example["answer"]:
+        return str(example["answer"]).strip()
+
+    return None
+
+
+def binary_outcome_reward(prompt, response, ground_truth):
+    """
+    Binary outcome reward for NuminaMath: +1 if correct, -1 if incorrect.
+    Compares normalized LaTeX expressions.
+    """
+    if ground_truth is None:
+        return -1.0
+
+    # Extract answer from model response
+    predicted = extract_answer(response)
+
+    if predicted is None:
+        return -1.0
+
+    # Normalize both for comparison
+    pred_norm = normalize_latex(predicted)
+    gt_norm = normalize_latex(ground_truth)
+
+    if pred_norm is None or gt_norm is None:
+        return -1.0
+
+    # String comparison (exact match after normalization)
+    if pred_norm == gt_norm:
+        return 1.0
+
+    # Try numeric comparison as fallback
+    try:
+        pred_num = float(re.sub(r'[^\d.\-]', '', predicted))
+        gt_num = float(re.sub(r'[^\d.\-]', '', ground_truth))
+        if abs(pred_num - gt_num) < 1e-6:
+            return 1.0
+    except (ValueError, TypeError):
+        pass
+
+    return -1.0
+
 
 print("=" * 60)
 print("DAY 2: BASELINE GRPO FULL TRAINING")
@@ -58,17 +193,11 @@ print("\n" + "=" * 60)
 print("Extracting ground truth answers...")
 print("=" * 60)
 
-def extract_ground_truth(example):
-    """Extract numerical ground truth from dataset"""
-    if "answer" in example:
-        return extract_answer(str(example["answer"]))
-    elif "solution" in example:
-        # Parse solution for final answer
-        return extract_answer(str(example["solution"]))
-    else:
-        raise KeyError("No answer field in dataset")
+ground_truths = [extract_ground_truth_numina(ex) for ex in train_dataset_full]
 
-ground_truths = [extract_ground_truth(ex) for ex in train_dataset_full]
+# Check extraction quality
+none_count = sum(1 for gt in ground_truths if gt is None)
+print(f"   Extracted: {len(ground_truths) - none_count} valid, {none_count} failed")
 print(f"✅ Extracted {len(ground_truths)} ground truth answers")
 print(f"   Sample GT: {ground_truths[:3]}")
 
@@ -83,22 +212,39 @@ print("\n" + "=" * 60)
 print("Creating reward function...")
 print("=" * 60)
 
-def reward_function_with_gt(prompts, responses):
+def reward_function_with_gt(prompts, completions, **kwargs):
     """Wrapper reward function for GRPO trainer"""
     rewards = []
-    for prompt, response in zip(prompts, responses):
+    for prompt, completion in zip(prompts, completions):
         gt = prompt_to_gt.get(prompt)
         if gt is None:
             print(f"⚠️  Warning: No GT for prompt: {prompt[:50]}...")
             rewards.append(-1.0)
         else:
-            reward = binary_outcome_reward(prompt, response, gt)
+            reward = binary_outcome_reward(prompt, completion, gt)
             rewards.append(reward)
     return rewards
 
-# Test on first few
-test_rewards = reward_function_with_gt(train_prompts_full[:3], ["The answer is X"]*3)
-print(f"✅ Test rewards: {test_rewards}")
+# Test extraction and reward
+print("\n[DEBUG] Testing NuminaMath extraction:")
+test_prompt = train_prompts_full[0]
+test_gt = ground_truths[0]
+print(f"   Ground truth: '{test_gt}'")
+
+# Test with correct boxed answer
+test_response_correct = f"Step 1: solve\\nStep 2: compute\\nThe answer is \\boxed{{{test_gt}}}"
+test_response_wrong = "The answer is \\boxed{999}"
+
+reward_correct = binary_outcome_reward(test_prompt, test_response_correct, test_gt)
+reward_wrong = binary_outcome_reward(test_prompt, test_response_wrong, test_gt)
+
+print(f"   Correct response reward: {reward_correct} (should be 1.0)")
+print(f"   Wrong response reward: {reward_wrong} (should be -1.0)")
+
+if reward_correct == 1.0 and reward_wrong == -1.0:
+    print("✅ Reward function working correctly!")
+else:
+    print("❌ Reward function needs debugging")
 
 # ============================================================================
 # SECTION 4: CREATE FULL BASELINE GRPO TRAINER
@@ -113,10 +259,10 @@ from trl import GRPOTrainer
 # Use same config as smoke test, but full dataset
 trainer_baseline = GRPOTrainer(
     model=model,
-    config=grpo_config,  # Same config from Day 1
-    tokenizer=tokenizer,
-    reward_funcs=reward_function_with_gt,
-    train_dataset=train_prompts_full,  # Full 1024 prompts
+    args=grpo_config,  # Same config from Day 1
+    processing_class=tokenizer,
+    reward_funcs=[reward_function_with_gt],  # Must be a list
+    train_dataset=[{"prompt": p} for p in train_prompts_full],  # List of dicts
 )
 
 # Save initial model (for recovery)
