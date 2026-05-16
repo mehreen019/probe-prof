@@ -1,0 +1,68 @@
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+data:
+  gen_batch_size: ${data.train_batch_size}
+
+algorithm:
+  max_step: 30 # max step
+  filter_groups:
+    len_step_reward_coef: 0 # reward coefficient for length of step
+    enable: False # We try to avoid forgetting to set enable
+    metric: acc # acc / score / seq_reward / seq_final_reward / 
+    max_num_gen_batches: 0 # Non-positive values mean no upper limit
+    prm_filter_type: prm_ic # prm_ic: prm inconsistensy with orm, lr_prm_ic: log prm/policy, Null
+    prof_filter: 0 # percent of trajectories filtered due to prm inconsistency
+    entropy_filter: 0 # Keep the prompt with entropy higher than entropy_filter
+  beta: 0.8 # beta for prm
+
+reward_model:
+  model:
+    freeze: true
+    enable: false
+    rollout_temperature: ${actor_rollout_ref.rollout.temperature}
+    path: ~/models/deepseek-llm-7b-chat
+    tokenizer_path: ${reward_model.model.path}
+    max_length: ${actor_rollout_ref.actor.ppo_max_token_len_per_gpu}
+    max_steps: 100
+    gamma: 0.99
+    use_fused_kernels: False
+    use_remove_padding:  True
+    ref_path: ${reward_model.model.path}
+    enable_gradient_checkpointing: ${actor_rollout_ref.model.enable_gradient_checkpointing}
+    ref_type: freeze
+    beta_train: 0.05
+    loss_type: ce # currently only supports ce loss
+    fsdp_config:
+      min_num_params: 0
+      param_offload: ${actor_rollout_ref.actor.fsdp_config.param_offload}
+      optimizer_offload: ${actor_rollout_ref.actor.fsdp_config.optimizer_offload}
+    optim:
+      lr: 1e-6
+      lr_warmup_steps: -1 # Prioritized. Negative values mean delegating to lr_warmup_steps_ratio.
+      lr_warmup_steps_ratio: 0.  # the total steps will be injected during runtime
+      min_lr_ratio: null
+      warmup_style: constant
+      total_training_steps: -1  # must be overridden by program
+      weight_decay: 0.
+      grad_clip: 10.0
+  overlong_buffer: 
+    enable: False # We try to avoid forgetting to set enable
+    len: 0
+    penalty_factor: 0.0
+    log: False
+  reward_manager: prof # this is verify function
+  mini_batch_size: ${actor_rollout_ref.actor.ppo_mini_batch_size}
+  update: before # ``before`` for double-forward, ``after`` for single-forward
+  prime_granularity: token
+  prime_norm: batch_norm # batch_norm or none. if set to none, the normalizer is beta_train
+
+
+
+trainer:
+  project_name: verl-dapo
