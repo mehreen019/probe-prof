@@ -47,8 +47,6 @@ def load_merged_model(adapter_path: str, base_model_id: str = "unsloth/Qwen2.5-M
     # Check whether this is a PEFT adapter or a fully merged model
     is_adapter = os.path.exists(os.path.join(adapter_path, "adapter_config.json"))
 
-    tokenizer = AutoTokenizer.from_pretrained(adapter_path, trust_remote_code=True)
-
     if is_adapter:
         try:
             peft_config = PeftConfig.from_pretrained(adapter_path)
@@ -56,8 +54,12 @@ def load_merged_model(adapter_path: str, base_model_id: str = "unsloth/Qwen2.5-M
         except Exception:
             effective_base = base_model_id
 
+        # Always load tokenizer from the base model — the adapter checkpoint's
+        # tokenizer.json is incomplete (missing the full Qwen vocab/merges).
         print(f"[load] base model: {effective_base}")
         print(f"[load] adapter  : {adapter_path}")
+        print(f"[load] loading tokenizer from base model...")
+        tokenizer = AutoTokenizer.from_pretrained(effective_base, trust_remote_code=True)
 
         base = AutoModelForCausalLM.from_pretrained(
             effective_base,
@@ -69,6 +71,7 @@ def load_merged_model(adapter_path: str, base_model_id: str = "unsloth/Qwen2.5-M
         model = model.merge_and_unload()
     else:
         print(f"[load] merged model: {adapter_path}")
+        tokenizer = AutoTokenizer.from_pretrained(adapter_path, trust_remote_code=True)
         model = AutoModelForCausalLM.from_pretrained(
             adapter_path,
             torch_dtype=torch.bfloat16,
