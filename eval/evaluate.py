@@ -162,6 +162,8 @@ def generate_responses(
 
     Saves incrementally to save_path (JSONL) so restarts are safe.
     """
+    import time
+
     results = []
     seen_problems = set()
 
@@ -177,15 +179,20 @@ def generate_responses(
         print(f"[generate] Resuming — {len(results)} problems already done")
 
     remaining = [r for r in records if r["problem"] not in seen_problems]
+    total = len(records)
+    n_done = len(seen_problems)
     print(f"[generate] Generating {n} responses × {len(remaining)} problems (batch={batch_size})")
 
     writer = None
     if save_path:
         writer = open(save_path, "a", encoding="utf-8")
 
+    session_start = time.time()
+
     try:
         for i in range(0, len(remaining), batch_size):
             batch = remaining[i : i + batch_size]
+            batch_start = time.time()
             prompts = [_build_prompt(tokenizer, r["problem"]) for r in batch]
 
             inputs = tokenizer(
@@ -207,25 +214,49 @@ def generate_responses(
                 )
 
             prompt_len = inputs["input_ids"].shape[1]
-            # outputs: (batch_size * n, seq_len)
             for j, rec in enumerate(batch):
                 seqs = outputs[j * n : (j + 1) * n]
                 responses = [
                     tokenizer.decode(s[prompt_len:], skip_special_tokens=True)
                     for s in seqs
                 ]
+                correct = [check_answer(r, rec["answer"]) for r in responses]
+                n_correct = sum(correct)
+                avg_len = sum(len(r) for r in responses) / len(responses)
+
                 entry = {
                     "problem": rec["problem"],
                     "answer": rec["answer"],
                     "responses": responses,
+                    "correct": correct,
                 }
                 results.append(entry)
                 if writer:
                     writer.write(json.dumps(entry, ensure_ascii=False) + "\n")
                     writer.flush()
+                n_done += 1
 
-            if (i // batch_size + 1) % 10 == 0:
-                print(f"  [{i + len(batch)}/{len(remaining)}] done")
+                print(
+                    f"  [{n_done:>4}/{total}] correct={n_correct}/{n}"
+                    f"  avg_len={avg_len:.0f}"
+                    f"  ans={str(rec['answer'])[:12]:<12}"
+                    f"  ({rec['problem'][:55].strip()}...)"
+                )
+
+            batch_elapsed = time.time() - batch_start
+            total_elapsed = time.time() - session_start
+            rate = n_done / max(total_elapsed, 1)
+            eta = (total - n_done) / rate if rate > 0 else 0
+            import torch as _torch
+            vram = _torch.cuda.memory_allocated() / 1e9
+            print(
+                f"  --- batch {i//batch_size + 1}"
+                f" | {batch_elapsed:.1f}s"
+                f" | elapsed {total_elapsed/60:.1f}m"
+                f" | ETA {eta/60:.1f}m"
+                f" | {rate:.3f} prob/s"
+                f" | VRAM {vram:.2f}GB\n"
+            )
 
     finally:
         if writer:
