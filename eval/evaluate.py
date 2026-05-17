@@ -193,6 +193,7 @@ def generate_responses(
         for i in range(0, len(remaining), batch_size):
             batch = remaining[i : i + batch_size]
             batch_start = time.time()
+            print(f"  [generating batch {i//batch_size + 1} | problems {n_done+1}–{n_done+len(batch)}/{total}]...")
             prompts = [_build_prompt(tokenizer, r["problem"]) for r in batch]
 
             inputs = tokenizer(
